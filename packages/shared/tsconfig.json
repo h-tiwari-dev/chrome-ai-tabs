@@ -3,7 +3,7 @@
   "compilerOptions": {
     "baseUrl": ".",
     "outDir": "dist",
-    "types": ["chrome"]
+    "types": ["chrome", "../../vite-env.d.ts"]
   },
   "include": ["index.ts", "lib"]
 }
