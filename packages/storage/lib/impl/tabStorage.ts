@@ -3,7 +3,7 @@ import { createStorage } from '../base/base';
 import type { BaseStorage } from '../base/types';
 
 export interface TabGroup {
-  id: string;
+  id: number;
   name: string;
   tabs: chrome.tabs.Tab[];
   category: string;
@@ -17,7 +17,7 @@ export interface TabGroup {
 
 interface TabState {
   groups: TabGroup[];
-  activeGroupId: string | null;
+  activeGroupId: number | null;
   lastSync: Date;
   ungroupedTabs: chrome.tabs.Tab[]; // Track tabs that aren't in any group
   currentWindow: number | null; // Track current window ID
@@ -25,7 +25,7 @@ interface TabState {
 
 interface SerializedTabState {
   groups: Array<{
-    id: string;
+    id: number;
     name: string;
     tabs: chrome.tabs.Tab[];
     category: string;
@@ -36,7 +36,7 @@ interface SerializedTabState {
     color?: chrome.tabGroups.ColorEnum;
     collapsed?: boolean;
   }>;
-  activeGroupId: string | null;
+  activeGroupId: number | null;
   lastSync: string;
   ungroupedTabs: chrome.tabs.Tab[];
   currentWindow: number | null;
@@ -100,11 +100,11 @@ const serialization = {
 
 interface TabStorageExtensions {
   addGroup: (group: Omit<TabGroup, 'created' | 'lastModified'>) => Promise<void>;
-  removeGroup: (groupId: string) => Promise<void>;
-  updateGroup: (groupId: string, updates: Partial<Omit<TabGroup, 'id'>>) => Promise<void>;
-  setActiveGroup: (groupId: string | null) => Promise<void>;
-  addTabsToGroup: (groupId: string, tabs: chrome.tabs.Tab[]) => Promise<void>;
-  removeTabFromGroup: (groupId: string, tabId: number) => Promise<void>;
+  removeGroup: (groupId: number) => Promise<void>;
+  updateGroup: (groupId: number, updates: Partial<Omit<TabGroup, 'id'>>) => Promise<void>;
+  setActiveGroup: (groupId: number | null) => Promise<void>;
+  addTabsToGroup: (groupId: number, tabs: chrome.tabs.Tab[]) => Promise<void>;
+  removeTabFromGroup: (groupId: number, tabId: number) => Promise<void>;
   updateUngroupedTabs: (tabs: chrome.tabs.Tab[]) => Promise<void>;
   addUngroupedTab: (tab: chrome.tabs.Tab) => Promise<void>;
   removeUngroupedTab: (tabId: number) => Promise<void>;

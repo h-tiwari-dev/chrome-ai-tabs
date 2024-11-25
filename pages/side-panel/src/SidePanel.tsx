@@ -119,16 +119,17 @@ const GroupItem = ({ group, isLight }: { group: ExtendedTabGroup; isLight: boole
 };
 
 const SidePanel = () => {
-  const { refreshTabs, isLoading, error } = useTabContext();
+  const { refreshTabs, isLoading, debugString, error } = useTabContext();
   const { ungroupedTabs } = useUngroupedTabs();
   const { tabGroups } = useTabGroups();
 
   // useEffect(() => {
   //   const handleFocus = () => refreshTabs();
   //   handleFocus()
-  //   // window.addEventListener('focus', handleFocus);
-  //   // return () => window.removeEventListener('focus', handleFocus);
+  //   window.addEventListener('focus', handleFocus);
+  //   return () => window.removeEventListener('focus', handleFocus);
   // }, [refreshTabs]);
+
   //
   // // TODO: Do something with this
   // // Add manual refresh button handler
@@ -151,6 +152,10 @@ const SidePanel = () => {
 
   return (
     <div className={`min-h-screen w-full ${isLight ? 'bg-slate-50' : 'bg-gray-800'}`}>
+      <div>
+        Debug: {debugString}
+        {JSON.stringify(tabGroups)}
+      </div>
       <header
         className={`sticky top-0 z-10 border-b p-4 ${
           isLight ? 'border-gray-200 bg-white' : 'border-gray-700 bg-gray-900'
@@ -184,6 +189,20 @@ const SidePanel = () => {
             {tabGroups.length > 0 && (
               <div className="space-y-4">
                 <h2 className={`font-medium ${isLight ? 'text-gray-900' : 'text-gray-100'}`}>Grouped Tabs</h2>
+                <div className="space-y-4">
+                  {tabGroups.map(group => (
+                    <GroupItem
+                      key={group.id}
+                      group={
+                        {
+                          ...group,
+                          windowId: group.id,
+                        } as ExtendedTabGroup
+                      }
+                      isLight={isLight}
+                    />
+                  ))}
+                </div>
               </div>
             )}
 
@@ -217,16 +236,3 @@ const ErrorView = () => (
 );
 
 export default withErrorBoundary(withSuspense(SidePanel, <LoadingView />), <ErrorView />);
-
-// <div className="space-y-4">
-//   {tabGroups.map(group => (
-//     <GroupItem
-//       key={group.id}
-//       group={{
-//         ...group,
-//         windowId: group.id,
-//       } as ExtendedTabGroup}
-//       isLight={isLight}
-//     />
-//   ))}
-// </div>

@@ -24,6 +24,9 @@ interface TabContextValue extends TabContextState {
   ungroupedTabs: chrome.tabs.Tab[];
   currentWindowId: number | null;
 
+  // Debuggibg
+  debugString: string;
+
   // Tab Management
   refreshTabs: () => Promise<void>;
   createTabGroup: (name: string, tabs: chrome.tabs.Tab[], color?: chrome.tabGroups.ColorEnum) => Promise<void>;
@@ -57,6 +60,7 @@ export const TabContextProvider: React.FC<{
 }> = ({ children }) => {
   const { suggestTabGroups, generateContextSummary } = useAISession();
   const snapshotRef = useRef(tabStorage.getSnapshot());
+  const [debugString, setDebugString] = useState('');
 
   // Local state
   const [state, setState] = useState<TabContextState>({
@@ -94,26 +98,47 @@ export const TabContextProvider: React.FC<{
   // Refresh tabs implementation
   const refreshTabs = useCallback(async () => {
     setState(prev => ({ ...prev, isLoading: true }));
-    try {
-      const [tabs, groups] = await Promise.all([chrome.tabs.query({}), chrome.tabGroups.query({})]);
 
+    // Initialize results object
+    const results = {
+      tabs: null,
+      groups: null,
+      error: null,
+    };
+
+    // Fetch tabs
+    try {
+      const tabs = await chrome.tabs.query({ currentWindow: true });
       const currentWindow = tabs[0]?.windowId;
       await tabStorage.setCurrentWindow(currentWindow);
       await tabStorage.syncWithCurrentTabs(tabs);
-
-      setState(prev => ({
-        ...prev,
-        currentTabs: tabs,
-        currentChromeGroups: groups,
-        isLoading: false,
-      }));
+      results.tabs = tabs;
     } catch (error) {
-      setState(prev => ({
-        ...prev,
-        error: error instanceof Error ? error : new Error('Failed to refresh tabs'),
-        isLoading: false,
-      }));
+      results.error = {
+        ...results.error,
+        tabs: error instanceof Error ? error : new Error('Failed to refresh tabs'),
+      };
     }
+
+    // Fetch tab groups
+    try {
+      const groups = await chrome.tabGroups.query({});
+      results.groups = groups;
+    } catch (error) {
+      results.error = {
+        ...results.error,
+        groups: error instanceof Error ? error : new Error('Failed to refresh tab groups'),
+      };
+    }
+
+    // Update state based on results
+    setState(prev => ({
+      ...prev,
+      currentTabs: results.tabs ?? prev.currentTabs,
+      currentChromeGroups: results.groups ?? prev.currentChromeGroups,
+      error: results.error,
+      isLoading: false,
+    }));
   }, []);
 
   // Tab event listeners
@@ -159,7 +184,6 @@ export const TabContextProvider: React.FC<{
     chrome.tabs.onCreated.addListener(handleTabCreated);
     chrome.tabs.onUpdated.addListener(handleTabUpdated);
     chrome.tabs.onRemoved.addListener(handleTabRemoved);
-
     return () => {
       chrome.tabs.onCreated.removeListener(handleTabCreated);
       chrome.tabs.onUpdated.removeListener(handleTabUpdated);
@@ -167,27 +191,64 @@ export const TabContextProvider: React.FC<{
     };
   }, [tabGroups, ungroupedTabs]);
 
+  useEffect(() => {
+    // setDebugString(JSON.stringify(state.currentChromeGroups))
+  }, [state.currentChromeGroups]);
+
   // Chrome tab group event listeners
   useEffect(() => {
-    const handleGroupCreated = (group: chrome.tabGroups.TabGroup) => {
+    const handleGroupCreated = async (group: chrome.tabGroups.TabGroup) => {
+      // setDebugString("Created Group" + JSON.stringify(group))
+
       setState(prev => ({
         ...prev,
         currentChromeGroups: [...prev.currentChromeGroups, group],
       }));
+      const tabs = await chrome.tabs.query({ groupId: group.id });
+      await tabStorage.addGroup({
+        id: group.id,
+        name: group.title || 'Unnamed Group',
+        tabs,
+        category: 'Uncategorized',
+        chromeGroupId: group.id,
+        color: group.color,
+        collapsed: group.collapsed,
+      });
+
+      // await tabStorage.addGroup(group);
     };
 
-    const handleGroupUpdated = (group: chrome.tabGroups.TabGroup) => {
+    const handleGroupUpdated = async (group: chrome.tabGroups.TabGroup) => {
       setState(prev => ({
         ...prev,
         currentChromeGroups: prev.currentChromeGroups.map(g => (g.id === group.id ? group : g)),
       }));
+      const storageGroup = tabGroups.find(g => g.chromeGroupId === group.id);
+      setDebugString('Group Updated');
+      if (storageGroup) {
+        // Get latest tabs in the group
+        const tabs = await chrome.tabs.query({ groupId: group.id });
+
+        await tabStorage.updateGroup(storageGroup.id, {
+          name: group.title || storageGroup.name,
+          color: group.color,
+          collapsed: group.collapsed,
+          tabs: tabs, // Update with current tabs
+        });
+      }
     };
 
-    const handleGroupRemoved = (group: chrome.tabGroups.TabGroup) => {
+    const handleGroupRemoved = async (group: chrome.tabGroups.TabGroup) => {
       setState(prev => ({
         ...prev,
         currentChromeGroups: prev.currentChromeGroups.filter(g => g.id !== group.id),
       }));
+      const storageGroup = tabGroups.find(g => g.chromeGroupId === group.id);
+      if (storageGroup) {
+        // The tabs from the group will automatically become ungrouped
+        // tabStorage.removeGroup will handle moving them to ungroupedTabs
+        await tabStorage.removeGroup(storageGroup.id);
+      }
     };
 
     chrome.tabGroups?.onCreated.addListener(handleGroupCreated);
@@ -199,7 +260,7 @@ export const TabContextProvider: React.FC<{
       chrome.tabGroups?.onUpdated.removeListener(handleGroupUpdated);
       chrome.tabGroups?.onRemoved.removeListener(handleGroupRemoved);
     };
-  }, []);
+  }, [tabGroups, ungroupedTabs]);
 
   const createTabGroup = useCallback(
     async (name: string, tabs: chrome.tabs.Tab[], color: chrome.tabGroups.ColorEnum = 'blue') => {
@@ -215,15 +276,15 @@ export const TabContextProvider: React.FC<{
         });
 
         // Create storage group
-        await tabStorage.addGroup({
-          id: crypto.randomUUID(),
-          name,
-          tabs,
-          category: 'Uncategorized',
-          chromeGroupId: groupId,
-          color: chromeGroup.color,
-          collapsed: chromeGroup.collapsed,
-        });
+        // await tabStorage.addGroup({
+        //   id: crypto.randomUUID(),
+        //   name,
+        //   tabs,
+        //   category: 'Uncategorized',
+        //   chromeGroupId: groupId,
+        //   color: chromeGroup.color,
+        //   collapsed: chromeGroup.collapsed,
+        // });
 
         // Update chrome groups in state
         setState(prev => ({
@@ -459,6 +520,7 @@ export const TabContextProvider: React.FC<{
     closeTabGroup,
     autoGroupCurrentTabs,
     generateGroupSummary,
+    debugString,
   };
 
   return <TabContext.Provider value={value}>{children}</TabContext.Provider>;
