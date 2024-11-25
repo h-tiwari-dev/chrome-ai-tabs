@@ -95,90 +95,96 @@ export const TabContextProvider: React.FC<{
   const ungroupedTabs = useSyncExternalStore(tabStorage.subscribe, getUngroupedTabs, () => []);
   const currentWindowId = useSyncExternalStore(tabStorage.subscribe, getCurrentWindowId, () => null);
 
-  // Refresh tabs implementation
-  const refreshTabs = useCallback(async () => {
-    setState(prev => ({ ...prev, isLoading: true }));
+  const syncTabStates = useCallback(async () => {
+    const currentTabs = await chrome.tabs.query({ currentWindow: true });
+    const chromeGroups = await chrome.tabGroups.query({});
 
-    // Initialize results object
-    const results = {
-      tabs: null,
-      groups: null,
-      error: null,
-    };
+    // Get all tabs with their group information
+    const tabGroupMap = new Map<number, number>(); // Map of tabId to groupId
 
-    // Fetch tabs
-    try {
-      const tabs = await chrome.tabs.query({ currentWindow: true });
-      const currentWindow = tabs[0]?.windowId;
-      await tabStorage.setCurrentWindow(currentWindow);
-      await tabStorage.syncWithCurrentTabs(tabs);
-      results.tabs = tabs;
-    } catch (error) {
-      results.error = {
-        ...results.error,
-        tabs: error instanceof Error ? error : new Error('Failed to refresh tabs'),
-      };
+    // First, collect all tabs and their group assignments from Chrome
+    for (const group of chromeGroups) {
+      const groupTabs = await chrome.tabs.query({ groupId: group.id });
+      groupTabs.forEach(tab => {
+        if (tab.id) {
+          tabGroupMap.set(tab.id, group.id);
+        }
+      });
     }
 
-    // Fetch tab groups
-    try {
-      const groups = await chrome.tabGroups.query({});
-      results.groups = groups;
-    } catch (error) {
-      results.error = {
-        ...results.error,
-        groups: error instanceof Error ? error : new Error('Failed to refresh tab groups'),
-      };
+    // Create new groups based on Chrome's state
+    const newGroups: TabGroup[] = [];
+    for (const chromeGroup of chromeGroups) {
+      const groupTabs = currentTabs.filter(tab => tab.id && tabGroupMap.get(tab.id) === chromeGroup.id);
+
+      setDebugString(JSON.stringify(chromeGroup));
+      if (groupTabs.length > 0) {
+        newGroups.push({
+          id: chromeGroup.id,
+          name: chromeGroup.title || 'Unnamed Group',
+          tabs: groupTabs,
+          category: 'Uncategorized',
+          created: new Date(),
+          lastModified: new Date(),
+          chromeGroupId: chromeGroup.id,
+          color: chromeGroup.color,
+          collapsed: chromeGroup.collapsed,
+        });
+      }
     }
 
-    // Update state based on results
-    setState(prev => ({
-      ...prev,
-      currentTabs: results.tabs ?? prev.currentTabs,
-      currentChromeGroups: results.groups ?? prev.currentChromeGroups,
-      error: results.error,
-      isLoading: false,
-    }));
+    // Identify truly ungrouped tabs
+    const ungroupedTabs = currentTabs.filter(tab => tab.id && !tabGroupMap.has(tab.id));
+
+    // Update storage with synchronized state
+    await tabStorage.set({
+      groups: newGroups,
+      activeGroupId: null, // Reset active group during sync
+      lastSync: new Date(),
+      ungroupedTabs,
+      currentWindow: currentTabs[0]?.windowId || null,
+    });
+
+    return { currentTabs, chromeGroups };
   }, []);
 
-  // Tab event listeners
-  useEffect(() => {
-    const handleTabCreated = async (tab: chrome.tabs.Tab) => {
+  // Update refreshTabs to use the new sync function
+  const refreshTabs = useCallback(async () => {
+    setState(prev => ({ ...prev, isLoading: true }));
+    try {
+      const { currentTabs, chromeGroups } = await syncTabStates();
+
       setState(prev => ({
         ...prev,
-        currentTabs: [...prev.currentTabs, tab],
+        currentTabs,
+        currentChromeGroups: chromeGroups,
+        error: null,
+        isLoading: false,
       }));
-      await tabStorage.addUngroupedTab(tab);
+    } catch (error) {
+      setState(prev => ({
+        ...prev,
+        error: error instanceof Error ? error : new Error('Failed to refresh tabs'),
+        isLoading: false,
+      }));
+    }
+  }, [syncTabStates]);
+
+  // Update tab event listeners to include sync
+  useEffect(() => {
+    const handleTabCreated = async (tab: chrome.tabs.Tab) => {
+      await refreshTabs(); // Full sync on tab creation
     };
 
     const handleTabUpdated = async (tabId: number, changeInfo: chrome.tabs.TabChangeInfo, tab: chrome.tabs.Tab) => {
-      setState(prev => ({
-        ...prev,
-        currentTabs: prev.currentTabs.map(t => (t.id === tabId ? tab : t)),
-      }));
-
-      // Update in storage if it's an ungrouped tab
-      if (ungroupedTabs.some(t => t.id === tabId)) {
-        const updatedUngroupedTabs = ungroupedTabs.map(t => (t.id === tabId ? tab : t));
-        await tabStorage.updateUngroupedTabs(updatedUngroupedTabs);
-      }
-
-      // Update in groups if the tab is grouped
-      for (const group of tabGroups) {
-        if (group.tabs.some(t => t.id === tabId)) {
-          await tabStorage.updateGroup(group.id, {
-            tabs: group.tabs.map(t => (t.id === tabId ? tab : t)),
-          });
-        }
+      // Only sync if groupId changed or URL changed
+      if (changeInfo.groupId !== undefined || changeInfo.url !== undefined) {
+        await refreshTabs();
       }
     };
 
     const handleTabRemoved = async (tabId: number) => {
-      setState(prev => ({
-        ...prev,
-        currentTabs: prev.currentTabs.filter(t => t.id !== tabId),
-      }));
-      await tabStorage.removeUngroupedTab(tabId);
+      await refreshTabs(); // Full sync on tab removal
     };
 
     chrome.tabs.onCreated.addListener(handleTabCreated);
@@ -189,78 +195,33 @@ export const TabContextProvider: React.FC<{
       chrome.tabs.onUpdated.removeListener(handleTabUpdated);
       chrome.tabs.onRemoved.removeListener(handleTabRemoved);
     };
-  }, [tabGroups, ungroupedTabs]);
+  }, [refreshTabs]);
+
+  // Update Chrome tab group event listeners
+  useEffect(() => {
+    const handleGroupChanged = async () => {
+      await refreshTabs(); // Full sync on any group change
+    };
+
+    chrome.tabGroups?.onCreated.addListener(handleGroupChanged);
+    chrome.tabGroups?.onUpdated.addListener(handleGroupChanged);
+    chrome.tabGroups?.onRemoved.addListener(handleGroupChanged);
+
+    return () => {
+      chrome.tabGroups?.onCreated.removeListener(handleGroupChanged);
+      chrome.tabGroups?.onUpdated.removeListener(handleGroupChanged);
+      chrome.tabGroups?.onRemoved.removeListener(handleGroupChanged);
+    };
+  }, [refreshTabs]);
+
+  // Initial sync on mount
+  useEffect(() => {
+    refreshTabs();
+  }, [refreshTabs]);
 
   useEffect(() => {
     // setDebugString(JSON.stringify(state.currentChromeGroups))
   }, [state.currentChromeGroups]);
-
-  // Chrome tab group event listeners
-  useEffect(() => {
-    const handleGroupCreated = async (group: chrome.tabGroups.TabGroup) => {
-      // setDebugString("Created Group" + JSON.stringify(group))
-
-      setState(prev => ({
-        ...prev,
-        currentChromeGroups: [...prev.currentChromeGroups, group],
-      }));
-      const tabs = await chrome.tabs.query({ groupId: group.id });
-      await tabStorage.addGroup({
-        id: group.id,
-        name: group.title || 'Unnamed Group',
-        tabs,
-        category: 'Uncategorized',
-        chromeGroupId: group.id,
-        color: group.color,
-        collapsed: group.collapsed,
-      });
-
-      // await tabStorage.addGroup(group);
-    };
-
-    const handleGroupUpdated = async (group: chrome.tabGroups.TabGroup) => {
-      setState(prev => ({
-        ...prev,
-        currentChromeGroups: prev.currentChromeGroups.map(g => (g.id === group.id ? group : g)),
-      }));
-      const storageGroup = tabGroups.find(g => g.chromeGroupId === group.id);
-      setDebugString('Group Updated');
-      if (storageGroup) {
-        // Get latest tabs in the group
-        const tabs = await chrome.tabs.query({ groupId: group.id });
-
-        await tabStorage.updateGroup(storageGroup.id, {
-          name: group.title || storageGroup.name,
-          color: group.color,
-          collapsed: group.collapsed,
-          tabs: tabs, // Update with current tabs
-        });
-      }
-    };
-
-    const handleGroupRemoved = async (group: chrome.tabGroups.TabGroup) => {
-      setState(prev => ({
-        ...prev,
-        currentChromeGroups: prev.currentChromeGroups.filter(g => g.id !== group.id),
-      }));
-      const storageGroup = tabGroups.find(g => g.chromeGroupId === group.id);
-      if (storageGroup) {
-        // The tabs from the group will automatically become ungrouped
-        // tabStorage.removeGroup will handle moving them to ungroupedTabs
-        await tabStorage.removeGroup(storageGroup.id);
-      }
-    };
-
-    chrome.tabGroups?.onCreated.addListener(handleGroupCreated);
-    chrome.tabGroups?.onUpdated.addListener(handleGroupUpdated);
-    chrome.tabGroups?.onRemoved.addListener(handleGroupRemoved);
-
-    return () => {
-      chrome.tabGroups?.onCreated.removeListener(handleGroupCreated);
-      chrome.tabGroups?.onUpdated.removeListener(handleGroupUpdated);
-      chrome.tabGroups?.onRemoved.removeListener(handleGroupRemoved);
-    };
-  }, [tabGroups, ungroupedTabs]);
 
   const createTabGroup = useCallback(
     async (name: string, tabs: chrome.tabs.Tab[], color: chrome.tabGroups.ColorEnum = 'blue') => {
